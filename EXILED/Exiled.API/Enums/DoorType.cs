@@ -158,9 +158,9 @@ namespace Exiled.API.Enums
         HeavyContainmentDoor,
 
         /// <summary>
-        /// Represents the HCZ Containment Bulkhead door.
+        /// Represents any heavy containment styled door.
         /// </summary>
-        BulkDoor,
+        HeavyBulkDoor,
 
         /// <summary>
         /// Represents the HID_CHAMBER door.
