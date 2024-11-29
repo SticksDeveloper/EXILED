@@ -20,6 +20,7 @@ namespace Exiled.API.Features.Toys
     {
         private static PrimitiveObjectToy primitiveBaseObject;
         private static LightSourceToy lightBaseObject;
+        private static SpeakerToy speakerToy;
         private static ShootingTarget sportShootingTargetObject;
         private static ShootingTarget dboyShootingTargetObject;
         private static ShootingTarget binaryShootingTargetObject;
@@ -67,6 +68,30 @@ namespace Exiled.API.Features.Toys
                 }
 
                 return lightBaseObject;
+            }
+        }
+
+        /// <summary>
+        /// Gets the base <see cref="SpeakerToy"/> to instantiate when creating a new SPEAKERTOY, we love the speakertoy with all our hearts, you should too...
+        /// Documentation is the best thing you shouldn't do.
+        /// </summary>
+        public static SpeakerToy SpeakerBaseObject
+        {
+            get
+            {
+                if (speakerToy is null)
+                {
+                    foreach (GameObject gameObject in NetworkClient.prefabs.Values)
+                    {
+                        if (gameObject.TryGetComponent(out SpeakerToy component))
+                        {
+                            speakerToy = component;
+                            break;
+                        }
+                    }
+                }
+
+                return speakerToy;
             }
         }
 
