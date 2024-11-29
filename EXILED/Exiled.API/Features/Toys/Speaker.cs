@@ -20,6 +20,7 @@ namespace Exiled.API.Features.Toys
     using NVorbis;
     using UnityEngine;
     using Utils.Networking;
+    using VoiceChat.Codec;
     using VoiceChat.Networking;
 
     using Object = UnityEngine.Object;
@@ -30,12 +31,12 @@ namespace Exiled.API.Features.Toys
     public class Speaker : AdminToy, IWrapper<SpeakerToy>
     {
         private const int SamplesPerChunk = 480;
-        private readonly PlaybackBuffer playbackBuffer = new();
-        private readonly Queue<float> streamBuffer = new();
 
-        private float allowedSamples;
-        private int samplesPerSecond;
+        // private readonly PlaybackBuffer playbackBuffer = new();
+        // private readonly Queue<float> streamBuffer = new();
 
+        // private float allowedSamples;
+        // private int samplesPerSecond;
         private bool stopPlayback;
         private bool isPlaying;
 
@@ -134,18 +135,20 @@ namespace Exiled.API.Features.Toys
         /// Plays a single audio file through the speaker system. (No Arguments given (assuming you already preset those)).
         /// </summary>
         /// <param name="path">Path to the audio file to play.</param>
+        /// <param name="destroyAfter">Whether or not the Speaker gets destroyed after its done playing.</param>
         /// <returns>A boolean indicating if playback was successful.</returns>
-        public bool Play(string path) => Play(path, Volume, MinDistance, MaxDistance);
+        public bool Play(string path, bool destroyAfter = false) => Play(path, Volume, MinDistance, MaxDistance, destroyAfter);
 
         /// <summary>
         /// Plays an audio file using FFmpeg to decode it into raw audio data.
         /// </summary>
         /// <param name="path">The file path of the audio file.</param>
-        /// <param name="volume">The desired playback volume.</param>
+        /// <param name="volume">The desired playback volume. (0 to <see cref="float"/>) max limit.</param>
         /// <param name="minDistance">The minimum distance at which the audio is audible.</param>
         /// <param name="maxDistance">The maximum distance at which the audio is audible.</param>
+        /// <param name="destroyAfter">Whether or not the Speaker gets destroyed after its done playing.</param>
         /// <returns>A boolean indicating if playback was successful.</returns>
-        public bool Play(string path, float volume, float minDistance, float maxDistance)
+        public bool Play(string path, float volume, float minDistance, float maxDistance, bool destroyAfter)
         {
             if (isPlaying)
                 Stop();
@@ -178,123 +181,76 @@ namespace Exiled.API.Features.Toys
         {
             stopPlayback = false;
 
-            // Determine file format based on extension
+            // File format detection
             string fileExtension = Path.GetExtension(filePath).ToLower();
-            Log.Info($"File detected: {filePath}, Extension: {fileExtension}");
+            Log.Info($"Detected file: {filePath}, Extension: {fileExtension}");
 
-            int sampleRate; // Default to 48kHz
-            int channels; // Default to mono
+            // Constants for playback
+            const int sampleRate = 48000; // Enforce 48kHz
+            const int channels = 1; // Enforce mono audio
+            const int frameSize = 480; // Standard Opus frame size
 
-            // Variables for data processing
-            float[] floatBuffer = new float[SamplesPerChunk];
-            byte[] byteBuffer;
+            // Buffers and encoding
+            PlaybackBuffer playbackBuffer = new();
+            Queue<float> streamBuffer = new();
+            float[] readBuffer = new float[(48000 / 5) + 1920];
+            float[] sendBuffer = new float[(48000 / 5) + 1920];
+            byte[] encodedBuffer = new byte[512];
+            OpusEncoder encoder = new(VoiceChat.Codec.Enums.OpusApplicationType.Voip);
 
-            switch (fileExtension)
+            // Decoding and playback loop
+            if (fileExtension == ".ogg")
             {
-                case ".ogg":
+                using VorbisReader vorbisReader = new(filePath);
+
+                // Validate format
+                if (vorbisReader.SampleRate != sampleRate || vorbisReader.Channels != channels)
                 {
-                    Log.Info("Detected OGG file. Using NVorbis for playback.");
-                    using VorbisReader vorbisReader = new(filePath);
-                    sampleRate = vorbisReader.SampleRate;
-                    channels = vorbisReader.Channels;
-                    samplesPerSecond = sampleRate * channels;
-
-                    Log.Info($"Playing OGG file with Sample Rate: {sampleRate}, Channels: {channels}");
-
-                    while (!stopPlayback)
-                    {
-                        int samplesRead = vorbisReader.ReadSamples(floatBuffer, 0, SamplesPerChunk);
-                        if (samplesRead <= 0)
-                            break;
-
-                        foreach (float sample in floatBuffer.Take(samplesRead))
-                            streamBuffer.Enqueue(sample);
-
-                        while (streamBuffer.Count >= SamplesPerChunk)
-                        {
-                            allowedSamples += Time.deltaTime * samplesPerSecond;
-                            int samplesToCopy = Mathf.Min(Mathf.FloorToInt(allowedSamples), streamBuffer.Count);
-
-                            for (int i = 0; i < samplesToCopy; i++)
-                                playbackBuffer.Write(streamBuffer.Dequeue());
-
-                            allowedSamples -= samplesToCopy;
-
-                            if (playbackBuffer.Length >= SamplesPerChunk)
-                            {
-                                playbackBuffer.ReadTo(floatBuffer, SamplesPerChunk, 0);
-                                byte[] encodedData = EncodeSamples(floatBuffer);
-                                AudioMessage audioMessage = new(ControllerID, encodedData, SamplesPerChunk);
-                                audioMessage.SendToAuthenticated();
-
-                                Log.Info($"Sent audio data: {SamplesPerChunk} bytes for Controller ID: {ControllerID}");
-                            }
-
-                            yield return Timing.WaitForOneFrame;
-                        }
-                    }
-
-                    break;
-                }
-
-                case ".mp3":
-                case ".wav":
-                {
-                    Log.Info($"Detected {fileExtension.ToUpper()} file. Using NAudio for playback.");
-
-                    using WaveStream audioReader = fileExtension == ".mp3" ? new Mp3FileReader(filePath) : new WaveFileReader(filePath);
-                    sampleRate = audioReader.WaveFormat.SampleRate;
-                    channels = audioReader.WaveFormat.Channels;
-                    samplesPerSecond = sampleRate * channels;
-
-                    Log.Info($"Playing {fileExtension.ToUpper()} file with Sample Rate: {sampleRate}, Channels: {channels}");
-
-                    byteBuffer = new byte[SamplesPerChunk * audioReader.WaveFormat.BlockAlign];
-
-                    while (!stopPlayback)
-                    {
-                        int bytesRead = audioReader.Read(byteBuffer, 0, byteBuffer.Length);
-                        if (bytesRead <= 0)
-                            break;
-
-                        int samplesRead = ConvertBytesToFloats(byteBuffer, floatBuffer, bytesRead, audioReader.WaveFormat);
-
-                        foreach (float sample in floatBuffer.Take(samplesRead))
-                            streamBuffer.Enqueue(sample);
-
-                        while (streamBuffer.Count >= SamplesPerChunk)
-                        {
-                            allowedSamples += Time.deltaTime * samplesPerSecond;
-                            int samplesToCopy = Mathf.Min(Mathf.FloorToInt(allowedSamples), streamBuffer.Count);
-
-                            for (int i = 0; i < samplesToCopy; i++)
-                                playbackBuffer.Write(streamBuffer.Dequeue());
-
-                            allowedSamples -= samplesToCopy;
-
-                            if (playbackBuffer.Length >= SamplesPerChunk)
-                            {
-                                playbackBuffer.ReadTo(floatBuffer, SamplesPerChunk, 0);
-                                byte[] encodedData = EncodeSamples(floatBuffer);
-                                AudioMessage audioMessage = new(ControllerID, encodedData, SamplesPerChunk);
-                                audioMessage.SendToAuthenticated();
-
-                                Log.Info($"Sent audio data: {SamplesPerChunk} bytes for Controller ID: {ControllerID}");
-                            }
-
-                            yield return Timing.WaitForOneFrame;
-                        }
-                    }
-
-                    break;
-                }
-
-                default:
-                    Log.Error($"Unsupported file format: {fileExtension}");
+                    Log.Error($"Invalid OGG file. Expected 48kHz mono, got {vorbisReader.SampleRate}Hz {vorbisReader.Channels} channel(s).");
                     yield break;
+                }
+
+                Log.Info($"Playing OGG file with Sample Rate: {sampleRate}, Channels: {channels}");
+
+                while (!stopPlayback)
+                {
+                    int samplesRead = vorbisReader.ReadSamples(readBuffer, 0, readBuffer.Length);
+                    if (samplesRead <= 0)
+                        break; // End of file
+
+                    // Enqueue samples for processing
+                    foreach (float sample in readBuffer.Take(samplesRead))
+                        streamBuffer.Enqueue(sample);
+
+                    // Process playback
+                    while (streamBuffer.Count >= frameSize)
+                    {
+                        for (int i = 0; i < frameSize; i++)
+                            playbackBuffer.Write(streamBuffer.Dequeue());
+
+                        if (playbackBuffer.Length >= frameSize)
+                        {
+                            playbackBuffer.ReadTo(sendBuffer, frameSize, 0);
+                            int dataLen = encoder.Encode(sendBuffer, encodedBuffer, frameSize);
+
+                            // Send audio message
+                            AudioMessage audioMessage = new(ControllerID, encodedBuffer, dataLen);
+                            audioMessage.SendToAuthenticated();
+
+                            Log.Info($"Sent {dataLen} bytes of encoded audio.");
+                        }
+
+                        yield return Timing.WaitForOneFrame;
+                    }
+                }
+            }
+            else
+            {
+                Log.Error($"Unsupported file format: {fileExtension}");
+                yield break;
             }
 
-            Log.Info($"Playback completed for file '{filePath}'.");
+            Log.Info("Playback completed.");
             isPlaying = false;
         }
 
